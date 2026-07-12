@@ -9,7 +9,7 @@ const { CW_TOKEN, SUPABASE_URL, SUPABASE_KEY, RENDER_KEYS } = process.env;
 
 const REPO_CONFIG = {
     "min": "https://github.com/mino-hobby-pro/MIN-Tube-Pro",
-    "choco": "https://github.com/myproxy0108-prog/anime9"
+    "choco": "https://github.com/myproxy0108-prog/Choco-Tube-Plus"
 };
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
