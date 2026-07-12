@@ -8,8 +8,8 @@ app.use(express.json());
 const { CW_TOKEN, SUPABASE_URL, SUPABASE_KEY, RENDER_KEYS } = process.env;
 
 const REPO_CONFIG = {
-    "tube": "https://github.com/mino-hobby-pro/MIN-Tube-Pro",
-    "mirror": "https://github.com/myproxy0108-prog/Cloud-moon-mirror"
+    "min": "https://github.com/mino-hobby-pro/MIN-Tube-Pro",
+    "manga": "https://github.com/myproxy0108-prog/Cloud-moon-mirror"
 };
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -31,7 +31,6 @@ async function initAccounts() {
             const res = await axios.get('https://api.render.com/v1/owners', {
                 headers: { Authorization: `Bearer ${key}` }
             });
-            // owner.idを正しく取得
             const ownerId = res.data[0].owner.id;
             loaded.push({ key, ownerId });
             console.log(`✅ Account Loaded: ${ownerId}`);
@@ -70,7 +69,7 @@ app.post('/webhook', async (req, res) => {
     const { data: logs, error: sbError } = await supabase.from('deploy_logs').select('*').eq('user_id', account_id.toString()).eq('deployed_at', today);
     
     if (logs && logs.length > 0) {
-        await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n制限：また明日！`);
+        await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n[info][title](stop) 制限[/title]今日はもう作っています！また明日！[/info]`);
         return;
     }
 
@@ -80,7 +79,7 @@ app.post('/webhook', async (req, res) => {
     try {
         const acc = ACCOUNTS[Math.floor(Math.random() * ACCOUNTS.length)];
 
-        // Render API 実行
+        // ★修正ポイント: envSpecificDetails の中にコマンドを追加しました
         const serviceName = `tmp-${repoKey}-${Date.now()}`.substring(0, 30);
         const createRes = await axios.post('https://api.render.com/v1/services', {
             name: serviceName,
@@ -92,8 +91,10 @@ app.post('/webhook', async (req, res) => {
                 env: 'node', 
                 region: 'oregon', 
                 plan: 'free',
-                // 必要最低限の設定を追加
-                numInstances: 1
+                envSpecificDetails: {
+                    buildCommand: 'npm install',  // インストールコマンド
+                    startCommand: 'npm start'     // 起動コマンド
+                }
             }
         }, { headers: { Authorization: `Bearer ${acc.key}` } });
 
@@ -116,13 +117,14 @@ app.post('/webhook', async (req, res) => {
 
         if (insError) throw new Error(`Supabase Insert Error: ${insError.message}`);
 
+        // 45秒後にURL書き換え
         setTimeout(async () => {
             await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, 
-                `body=[rp aid=${account_id} to=${room_id}]\n[info][title](cracker) 完了[/title]URL: ${deployUrl}\n3日後に消えます。[/info]`);
+                `body=[rp aid=${account_id} to=${room_id}]\n[info][title](cracker) 完了[/title]URL: ${deployUrl}\n※3日後に消えます。[/info]`);
         }, 45000);
 
     } catch (err) {
-        // エラーの詳細をChatworkに送る
+        // エラー詳細
         const errMsg = err.response?.data?.message || err.message;
         console.error("詳細エラー:", errMsg);
         await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, `body=[info][title](shock) エラー発生[/title]理由: ${errMsg}[/info]`);
