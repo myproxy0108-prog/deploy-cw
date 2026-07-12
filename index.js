@@ -8,8 +8,8 @@ app.use(express.json());
 const { CW_TOKEN, SUPABASE_URL, SUPABASE_KEY, RENDER_KEYS } = process.env;
 
 const REPO_CONFIG = {
-    "tube": "https://github.com/mino-hobby-pro/MIN-Tube-Pro",
-    "mirror": "https://github.com/myproxy0108-prog/Cloud-moon-mirror"
+    "min": "https://github.com/myproxy0108-prog/MIN-Tube-Pro/tree/main",
+    "choco": "https://github.com/myproxy0108-prog/Choco-Tube-Plus/tree/main"
 };
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
