@@ -1,3 +1,12 @@
+// --- エラー対策：古いNode.jsでも動くようにする設定 ---
+const fetch = require('node-fetch');
+if (!globalThis.fetch) {
+    globalThis.fetch = fetch;
+    globalThis.Headers = fetch.Headers;
+    globalThis.Request = fetch.Request;
+    globalThis.Response = fetch.Response;
+}
+
 const axios = require('axios');
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -10,49 +19,45 @@ const {
     CW_TOKEN,
     SUPABASE_URL,
     SUPABASE_KEY,
-    RENDER_KEYS // カンマ区切り例: rnd_key1,rnd_key2
+    RENDER_KEYS // カンマ区切り
 } = process.env;
 
-// リポジトリ設定（GitHubのURL）
+// リポジトリ設定
 const REPO_CONFIG = {
     "tube": "https://github.com/mino-hobby-pro/MIN-Tube-Pro",
     "mirror": "https://github.com/myproxy0108-prog/Cloud-moon-mirror"
 };
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-// Chatwork API設定
 const cwApi = axios.create({
     baseURL: 'https://api.chatwork.com/v2',
     headers: { 'X-ChatWorkToken': CW_TOKEN, 'Content-Type': 'application/x-www-form-urlencoded' }
 });
 
-// アカウント情報を保持する配列
 let ACCOUNTS = [];
 
-// --- 1. 起動時：全てのAPIキーからOwnerIDを自動取得 ---
+// --- 起動時にAPIキーからOwnerIDを自動取得 ---
 async function initAccounts() {
     const keys = RENDER_KEYS ? RENDER_KEYS.split(',') : [];
     const loaded = [];
     for (const k of keys) {
         const key = k.trim();
+        if (!key) continue;
         try {
             const res = await axios.get('https://api.render.com/v1/owners', {
                 headers: { Authorization: `Bearer ${key}` }
             });
-            // res.data[0].owner.id を取得
             const ownerId = res.data[0].owner.id;
             loaded.push({ key, ownerId });
-            console.log(`✅ Account Loaded: ${ownerId}`);
+            console.log(`✅ アカウント読み込み完了: ${ownerId}`);
         } catch (e) {
-            console.error(`❌ Invalid Render Key: ${key.substring(0, 8)}...`);
+            console.error(`❌ 無効なAPIキーです: ${key.substring(0, 10)}...`);
         }
     }
     ACCOUNTS = loaded;
-    if (ACCOUNTS.length === 0) console.error("⚠️ 有効なRenderアカウントが1つもありません！");
 }
 
-// --- 2. お掃除：3日経過したサービスを削除 ---
+// --- 3日経過したものを削除するお掃除機能 ---
 async function cleanup() {
     const now = new Date().toISOString();
     const { data: targets } = await supabase.from('deploy_logs').select('*').lt('delete_at', now);
@@ -68,18 +73,16 @@ async function cleanup() {
                 }
                 await cwApi.delete(`/rooms/${item.cw_room_id}/messages/${item.cw_message_id}`);
                 await supabase.from('deploy_logs').delete().eq('id', item.id);
-                console.log(`🗑️ Deleted service: ${item.render_service_id}`);
+                console.log(`🗑️ 期限切れ削除: ${item.service_type}`);
             } catch (e) {
-                console.error("Cleanup error:", e.message);
-                // すでに消えている場合はDBから削除
                 await supabase.from('deploy_logs').delete().eq('id', item.id);
             }
         }
     }
 }
-setInterval(cleanup, 1000 * 60 * 60); // 1時間に1回
+setInterval(cleanup, 1000 * 60 * 60); // 1時間に1回実行
 
-// --- 3. メイン：デプロイ処理 ---
+// --- Webhookメイン処理 ---
 app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
     const event = req.body.webhook_event;
@@ -91,8 +94,8 @@ app.post('/webhook', async (req, res) => {
     const repoUrl = REPO_CONFIG[repoKey];
 
     if (!repoUrl) {
-        const available = Object.keys(REPO_CONFIG).join(', ');
-        await cwApi.post(`/rooms/${room_id}/messages`, `body=[info][title]⚠️ エラー[/title]「${repoKey}」は未登録です。\n使用可能: ${available}[/info]`);
+        const list = Object.keys(REPO_CONFIG).join(', ');
+        await cwApi.post(`/rooms/${room_id}/messages`, `body=[info][title]⚠️ 種類エラー[/title]${list} から選んでください。[/info]`);
         return;
     }
 
@@ -102,19 +105,19 @@ app.post('/webhook', async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
     const { data: logs } = await supabase.from('deploy_logs').select('*').eq('user_id', account_id.toString()).eq('deployed_at', today);
     if (logs && logs.length > 0) {
-        await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n[info][title](stop) 1日1回まで[/title]本日はすでに実行済みです。また明日お試しください！[/info]`);
+        await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n[info][title](stop) 1日1回制限[/title]${user_name}さん、また明日作りにきてね！[/info]`);
         return;
     }
 
-    // 受付通知
-    const startRes = await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n[info][title](dance) 了解！${repoKey} を作ります[/title]Renderのアカウントを分散して構築を開始しました。(コーヒー)[hr]完了まで数分お待ちください。[/info]`);
+    // 受付メッセージ
+    const startRes = await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n[info][title](dance) 了解です！[/title]「${repoKey}」を構築します。(コーヒー)[hr]完了まで数分お待ちください。[/info]`);
     const cw_msg_id = startRes.data.message_id;
 
     try {
-        // アカウントをランダム選択
+        // アカウントをランダムに選ぶ
         const acc = ACCOUNTS[Math.floor(Math.random() * ACCOUNTS.length)];
 
-        // 新規サービス作成
+        // Renderで新規サービス作成
         const serviceName = `tmp-${repoKey}-${Date.now()}`.substring(0, 30);
         const createRes = await axios.post('https://api.render.com/v1/services', {
             name: serviceName,
@@ -125,18 +128,18 @@ app.post('/webhook', async (req, res) => {
             serviceDetails: { 
                 env: 'node', 
                 region: 'oregon', 
-                plan: 'free',
-                buildCommand: 'npm install', // 必要に応じて変更
-                startCommand: 'npm start'     // 必要に応じて変更
+                plan: 'free'
             }
         }, { headers: { Authorization: `Bearer ${acc.key}` } });
 
         const serviceId = createRes.data.id;
         const deployUrl = createRes.data.url;
+        
+        // 3日後の削除日時
         const deleteAt = new Date();
-        deleteAt.setDate(deleteAt.getDate() + 3); // 3日後
+        deleteAt.setDate(deleteAt.getDate() + 3);
 
-        // DB保存
+        // Supabaseに保存
         await supabase.from('deploy_logs').insert([{
             user_id: account_id.toString(),
             user_name,
@@ -148,20 +151,20 @@ app.post('/webhook', async (req, res) => {
             delete_at: deleteAt.toISOString()
         }]);
 
-        // 完了編集
+        // 45秒後にURLを編集して表示
         setTimeout(async () => {
             await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, 
-                `body=[rp aid=${account_id} to=${room_id}]\n[info][title](cracker) ${repoKey.toUpperCase()} 完了！ (cracker)[/title]あなた専用のURLを発行しました！(shiny)\n\n🌐 URL:\n${deployUrl}\n\n[hr]⚠️ 3日後にこのURLとメッセージは自動削除されます。[/info]`);
-        }, 45000); // 45秒待ってURLを表示
+                `body=[rp aid=${account_id} to=${room_id}]\n[info][title](cracker) ${repoKey.toUpperCase()} 完了！ (cracker)[/title]あなた専用URLができました！(shiny)\n\n🌐 URL:\n${deployUrl}\n\n[hr]⚠️ 3日後にこのURLとメッセージは自動削除されます。[/info]`);
+        }, 45000);
 
     } catch (err) {
         console.error(err.response?.data || err.message);
-        await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, `body=[info][title](shock) エラー[/title]作成に失敗しました。APIキーの制限か、リポジトリの連携設定を確認してください。[/info]`);
+        await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, `body=[info][title](shock) エラー[/title]作成に失敗しました。[/info]`);
     }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`ボット起動中... Port: ${PORT}`);
     await initAccounts();
 });
