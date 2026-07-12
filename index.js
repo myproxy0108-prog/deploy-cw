@@ -1,12 +1,3 @@
-// 【究極対策】Headersが見つからないエラーを物理的に消す
-if (typeof globalThis.Headers === 'undefined') {
-    const { Headers, Request, Response, fetch } = require('undici');
-    globalThis.Headers = Headers;
-    globalThis.Request = Request;
-    globalThis.Response = Response;
-    globalThis.fetch = fetch;
-}
-
 const axios = require('axios');
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -21,9 +12,7 @@ const REPO_CONFIG = {
     "mirror": "https://github.com/myproxy0108-prog/Cloud-moon-mirror"
 };
 
-// Supabaseクライアント作成
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
 const cwApi = axios.create({
     baseURL: 'https://api.chatwork.com/v2',
     headers: { 'X-ChatWorkToken': CW_TOKEN, 'Content-Type': 'application/x-www-form-urlencoded' }
@@ -31,6 +20,7 @@ const cwApi = axios.create({
 
 let ACCOUNTS = [];
 
+// 起動時に全アカウントのOwnerIDを取得
 async function initAccounts() {
     const keys = RENDER_KEYS ? RENDER_KEYS.split(',') : [];
     const loaded = [];
@@ -41,38 +31,18 @@ async function initAccounts() {
             const res = await axios.get('https://api.render.com/v1/owners', {
                 headers: { Authorization: `Bearer ${key}` }
             });
+            // owner.idを正しく取得
             const ownerId = res.data[0].owner.id;
             loaded.push({ key, ownerId });
             console.log(`✅ Account Loaded: ${ownerId}`);
         } catch (e) {
-            console.error(`❌ Key Invalid: ${key.substring(0, 10)}...`);
+            console.error(`❌ Key Error: ${e.message}`);
         }
     }
     ACCOUNTS = loaded;
 }
 
-async function cleanup() {
-    const now = new Date().toISOString();
-    const { data: targets } = await supabase.from('deploy_logs').select('*').lt('delete_at', now);
-    if (targets && targets.length > 0) {
-        for (const item of targets) {
-            try {
-                const acc = ACCOUNTS.find(a => a.ownerId === item.render_owner_id);
-                if (acc) {
-                    await axios.delete(`https://api.render.com/v1/services/${item.render_service_id}`, {
-                        headers: { Authorization: `Bearer ${acc.key}` }
-                    });
-                }
-                await cwApi.delete(`/rooms/${item.cw_room_id}/messages/${item.cw_message_id}`);
-                await supabase.from('deploy_logs').delete().eq('id', item.id);
-            } catch (e) {
-                await supabase.from('deploy_logs').delete().eq('id', item.id);
-            }
-        }
-    }
-}
-setInterval(cleanup, 1000 * 60 * 60);
-
+// Webhook
 app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
     const event = req.body.webhook_event;
@@ -83,13 +53,24 @@ app.post('/webhook', async (req, res) => {
     const repoKey = body.split(' ')[1];
     const repoUrl = REPO_CONFIG[repoKey];
 
-    if (!repoUrl || ACCOUNTS.length === 0) return;
+    // エラーチェック: リポジトリ
+    if (!repoUrl) {
+        await cwApi.post(`/rooms/${room_id}/messages`, `body=[info][title]⚠️[/title]${repoKey} は登録されていません。[/info]`);
+        return;
+    }
 
+    // エラーチェック: アカウント読み込み
+    if (ACCOUNTS.length === 0) {
+        await cwApi.post(`/rooms/${room_id}/messages`, `body=Renderのアカウントが読み込めていません。環境変数 RENDER_KEYS を確認してください。`);
+        return;
+    }
+
+    // 1日1回制限
     const today = new Date().toISOString().split('T')[0];
-    const { data: logs } = await supabase.from('deploy_logs').select('*').eq('user_id', account_id.toString()).eq('deployed_at', today);
+    const { data: logs, error: sbError } = await supabase.from('deploy_logs').select('*').eq('user_id', account_id.toString()).eq('deployed_at', today);
     
     if (logs && logs.length > 0) {
-        await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n[info][title](stop) 制限[/title]1日1回までです。[/info]`);
+        await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n制限：また明日！`);
         return;
     }
 
@@ -98,6 +79,8 @@ app.post('/webhook', async (req, res) => {
 
     try {
         const acc = ACCOUNTS[Math.floor(Math.random() * ACCOUNTS.length)];
+
+        // Render API 実行
         const serviceName = `tmp-${repoKey}-${Date.now()}`.substring(0, 30);
         const createRes = await axios.post('https://api.render.com/v1/services', {
             name: serviceName,
@@ -105,7 +88,13 @@ app.post('/webhook', async (req, res) => {
             type: 'web_service',
             repo: repoUrl,
             autoDeploy: 'no',
-            serviceDetails: { env: 'node', region: 'oregon', plan: 'free' }
+            serviceDetails: { 
+                env: 'node', 
+                region: 'oregon', 
+                plan: 'free',
+                // 必要最低限の設定を追加
+                numInstances: 1
+            }
         }, { headers: { Authorization: `Bearer ${acc.key}` } });
 
         const serviceId = createRes.data.id;
@@ -113,7 +102,8 @@ app.post('/webhook', async (req, res) => {
         const deleteAt = new Date();
         deleteAt.setDate(deleteAt.getDate() + 3);
 
-        await supabase.from('deploy_logs').insert([{
+        // Supabase保存
+        const { error: insError } = await supabase.from('deploy_logs').insert([{
             user_id: account_id.toString(),
             user_name,
             service_type: repoKey,
@@ -124,18 +114,21 @@ app.post('/webhook', async (req, res) => {
             delete_at: deleteAt.toISOString()
         }]);
 
+        if (insError) throw new Error(`Supabase Insert Error: ${insError.message}`);
+
         setTimeout(async () => {
             await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, 
-                `body=[rp aid=${account_id} to=${room_id}]\n[info][title](cracker) 完了[/title]URL: ${deployUrl}\n※3日後に削除されます。[/info]`);
+                `body=[rp aid=${account_id} to=${room_id}]\n[info][title](cracker) 完了[/title]URL: ${deployUrl}\n3日後に消えます。[/info]`);
         }, 45000);
 
     } catch (err) {
-        await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, `body=エラーが発生しました。`);
+        // エラーの詳細をChatworkに送る
+        const errMsg = err.response?.data?.message || err.message;
+        console.error("詳細エラー:", errMsg);
+        await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, `body=[info][title](shock) エラー発生[/title]理由: ${errMsg}[/info]`);
     }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-    console.log(`Bot Active on Port ${PORT}`);
+app.listen(process.env.PORT || 3000, async () => {
     await initAccounts();
 });
