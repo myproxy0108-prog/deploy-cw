@@ -8,10 +8,9 @@ app.use(express.json());
 const { CW_TOKEN, SUPABASE_URL, SUPABASE_KEY, RENDER_KEYS } = process.env;
 
 const REPO_CONFIG = {
-    "min": "https://github.com/myproxy0108-prog/MIN-Tube-Pro",
-    "choco": "https://github.com/myproxy0108-prog/Choco-Tube-Plus"
+    "tube": "https://github.com/mino-hobby-pro/MIN-Tube-Pro",
+    "mirror": "https://github.com/myproxy0108-prog/Cloud-moon-mirror"
 };
-
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const cwApi = axios.create({
@@ -20,10 +19,9 @@ const cwApi = axios.create({
 });
 
 let ACCOUNTS = [];
-
-// ★追加: ユーザーが「URL入力待ち」の状態かを記録するメモリ
 const pendingDeploys = {};
 
+// アカウント読み込み
 async function initAccounts() {
     const keys = RENDER_KEYS ? RENDER_KEYS.split(',') : [];
     const loaded = [];
@@ -44,11 +42,9 @@ async function initAccounts() {
     ACCOUNTS = loaded;
 }
 
-// Chatworkの返信タグなどを取り除き、純粋なテキストだけにする関数
+// ★修正ポイント: Chatwork特有の「返信タグ＋相手の名前＋改行」をまとめて消し去る最強の掃除関数
 function cleanMessage(text) {
-    return text.replace(/\[rp aid=[0-9]+ to=[0-9\-]+\]/g, '')
-               .replace(/\[To:[0-9]+\]/g, '')
-               .trim();
+    return text.replace(/\[(rp aid=[0-9]+ to=[0-9\-]+|To:[0-9]+)\][^\n]*\n?/g, '').trim();
 }
 
 app.post('/webhook', async (req, res) => {
@@ -59,11 +55,11 @@ app.post('/webhook', async (req, res) => {
     const { account_id, body, room_id, message_id } = event;
     const user_name = event.from_account_id_name || "ユーザー";
     
-    // タグを除去した純粋なメッセージ
+    // タグとボットの名前を取り除いた純粋なメッセージ
     const bodyStr = cleanMessage(body);
 
     // ============================================
-    // 1. /dl コマンド (一覧表示)
+    // 1. /dl コマンド
     // ============================================
     if (bodyStr === '/dl') {
         let listText = "";
@@ -76,7 +72,7 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ============================================
-    // 2. /deploy コマンド (URL入力待ちへの移行)
+    // 2. /deploy コマンド
     // ============================================
     if (bodyStr.startsWith('/deploy')) {
         const repoKey = bodyStr.split(' ')[1];
@@ -91,7 +87,6 @@ app.post('/webhook', async (req, res) => {
             return;
         }
 
-        // 1日1回制限のチェック
         const today = new Date().toISOString().split('T')[0];
         const { data: logs } = await supabase.from('deploy_logs').select('*').eq('user_id', account_id.toString()).eq('deployed_at', today);
         if (logs && logs.length > 0) {
@@ -99,23 +94,20 @@ app.post('/webhook', async (req, res) => {
             return;
         }
 
-        // ★追加: URL待ち状態としてメモリに記録 (5分間有効)
-        pendingDeploys[account_id] = {
-            repoKey: repoKey,
-            timestamp: Date.now()
-        };
+        // URL待ち状態として記録 (5分有効)
+        pendingDeploys[account_id] = { repoKey: repoKey, timestamp: Date.now() };
 
         await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title]🔗 URLの設定[/title]どのようなURLにしますか？\nこのメッセージに【英数字とハイフンのみ】で返信してください。\n\n（例: abide と打つと abide-xxxx.onrender.com になります）[/info]`);
         return;
     }
 
     // ============================================
-    // 3. URL入力待ち状態のユーザーからの返信処理
+    // 3. URL入力待ちユーザーからの返信処理
     // ============================================
     if (pendingDeploys[account_id]) {
         const pending = pendingDeploys[account_id];
         
-        // 5分経過していたらタイムアウトとしてキャンセル
+        // 5分経過キャンセル
         if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
             delete pendingDeploys[account_id];
             return; 
@@ -123,13 +115,12 @@ app.post('/webhook', async (req, res) => {
 
         const customUrl = bodyStr;
 
-        // ★文字のチェック (英数字とハイフンのみか)
+        // 文字のチェック (英数字とハイフンのみか)
         if (!/^[a-zA-Z0-9\-]+$/.test(customUrl)) {
             await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title]⚠️ エラー[/title]「${customUrl}」には使えない文字が含まれています。\n英数字とハイフンのみでもう一度返信してください。[/info]`);
             return;
         }
 
-        // チェックを通過したので、待ち状態を解除
         delete pendingDeploys[account_id];
 
         const repoKey = pending.repoKey;
@@ -141,13 +132,12 @@ app.post('/webhook', async (req, res) => {
         try {
             const acc = ACCOUNTS[Math.floor(Math.random() * ACCOUNTS.length)];
 
-            // ★Renderのサービス名（＝URLのサブドメインになる）に指定された文字を組み込む
-            // 重複エラーを防ぐため、後ろにランダムな4桁の数字を付ける (例: abide-9382)
+            // URL名生成 (重複防止でランダム4桁付与)
             const randomCode = Math.floor(1000 + Math.random() * 9000);
             const serviceName = `${customUrl.substring(0, 20)}-${randomCode}`.toLowerCase();
 
             const createRes = await axios.post('https://api.render.com/v1/services', {
-                name: serviceName, // ← ここがURLになります！
+                name: serviceName,
                 ownerId: acc.ownerId,
                 type: 'web_service',
                 repo: repoUrl,
@@ -195,7 +185,7 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// 3日経過したサービスを自動削除
+// 3日経過削除
 async function cleanup() {
     const now = new Date().toISOString();
     const { data: targets } = await supabase.from('deploy_logs').select('*').lt('delete_at', now);
