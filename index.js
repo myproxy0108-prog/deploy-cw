@@ -8,7 +8,6 @@ app.use(express.json());
 const { CW_TOKEN, SUPABASE_URL, SUPABASE_KEY, RENDER_KEYS } = process.env;
 
 const REPO_CONFIG = {
-   今ぶっ壊してる(
 };
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
