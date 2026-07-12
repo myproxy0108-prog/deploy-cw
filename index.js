@@ -1,3 +1,12 @@
+// 【究極対策】Headersが見つからないエラーを物理的に消す
+if (typeof globalThis.Headers === 'undefined') {
+    const { Headers, Request, Response, fetch } = require('undici');
+    globalThis.Headers = Headers;
+    globalThis.Request = Request;
+    globalThis.Response = Response;
+    globalThis.fetch = fetch;
+}
+
 const axios = require('axios');
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -5,20 +14,14 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 app.use(express.json());
 
-// --- 環境変数 ---
-const {
-    CW_TOKEN,
-    SUPABASE_URL,
-    SUPABASE_KEY,
-    RENDER_KEYS
-} = process.env;
+const { CW_TOKEN, SUPABASE_URL, SUPABASE_KEY, RENDER_KEYS } = process.env;
 
 const REPO_CONFIG = {
     "tube": "https://github.com/mino-hobby-pro/MIN-Tube-Pro",
     "mirror": "https://github.com/myproxy0108-prog/Cloud-moon-mirror"
 };
 
-// Supabaseクライアント（Node 18+ の標準fetchを使用）
+// Supabaseクライアント作成
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const cwApi = axios.create({
@@ -28,7 +31,6 @@ const cwApi = axios.create({
 
 let ACCOUNTS = [];
 
-// 起動時にOwnerIDを取得
 async function initAccounts() {
     const keys = RENDER_KEYS ? RENDER_KEYS.split(',') : [];
     const loaded = [];
@@ -41,15 +43,14 @@ async function initAccounts() {
             });
             const ownerId = res.data[0].owner.id;
             loaded.push({ key, ownerId });
-            console.log(`✅ アカウント読み込み完了: ${ownerId}`);
+            console.log(`✅ Account Loaded: ${ownerId}`);
         } catch (e) {
-            console.error(`❌ キーが無効です: ${key.substring(0, 10)}...`);
+            console.error(`❌ Key Invalid: ${key.substring(0, 10)}...`);
         }
     }
     ACCOUNTS = loaded;
 }
 
-// 3日経過したものを削除
 async function cleanup() {
     const now = new Date().toISOString();
     const { data: targets } = await supabase.from('deploy_logs').select('*').lt('delete_at', now);
@@ -72,7 +73,6 @@ async function cleanup() {
 }
 setInterval(cleanup, 1000 * 60 * 60);
 
-// Webhookメイン
 app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
     const event = req.body.webhook_event;
@@ -85,15 +85,15 @@ app.post('/webhook', async (req, res) => {
 
     if (!repoUrl || ACCOUNTS.length === 0) return;
 
-    // 1日1回制限
     const today = new Date().toISOString().split('T')[0];
     const { data: logs } = await supabase.from('deploy_logs').select('*').eq('user_id', account_id.toString()).eq('deployed_at', today);
+    
     if (logs && logs.length > 0) {
         await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n[info][title](stop) 制限[/title]1日1回までです。[/info]`);
         return;
     }
 
-    const startRes = await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n[info][title](dance) 受付[/title]${repoKey} を構築します。[/info]`);
+    const startRes = await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}]\n[info][title](dance) 準備中[/title]構築を開始しました。[/info]`);
     const cw_msg_id = startRes.data.message_id;
 
     try {
@@ -126,7 +126,7 @@ app.post('/webhook', async (req, res) => {
 
         setTimeout(async () => {
             await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, 
-                `body=[rp aid=${account_id} to=${room_id}]\n[info][title](cracker) 完了 (cracker)[/title]URL: ${deployUrl}\n※3日後に消えます。[/info]`);
+                `body=[rp aid=${account_id} to=${room_id}]\n[info][title](cracker) 完了[/title]URL: ${deployUrl}\n※3日後に削除されます。[/info]`);
         }, 45000);
 
     } catch (err) {
@@ -136,6 +136,6 @@ app.post('/webhook', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-    console.log(`Started`);
+    console.log(`Bot Active on Port ${PORT}`);
     await initAccounts();
 });
