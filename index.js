@@ -8,9 +8,15 @@ app.use(express.json());
 const { CW_TOKEN, SUPABASE_URL, SUPABASE_KEY, RENDER_KEYS } = process.env;
 
 const REPO_CONFIG = {
-    "min": "https://github.com/mino-hobby-pro/MIN-Tube-Pro",
-    "choco": "https://github.com/myproxy0108-prog/Choco-Tube-Plus"
+    "tube": "https://github.com/mino-hobby-pro/MIN-Tube-Pro",
+    "mirror": "https://github.com/myproxy0108-prog/Cloud-moon-mirror"
 };
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const cwApi = axios.create({
+    baseURL: 'https://api.chatwork.com/v2',
+    headers: { 'X-ChatWorkToken': CW_TOKEN, 'Content-Type': 'application/x-www-form-urlencoded' }
+});
 
 let ACCOUNTS = [];
 
