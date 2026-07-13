@@ -12,16 +12,17 @@ const REPO_CONFIG = {
     "choco": "https://github.com/myproxy0108-prog/Choco-Tube-Plus"
 };
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-const cwApi = axios.create({
-    baseURL: 'https://api.chatwork.com/v2',
-    headers: { 'X-ChatWorkToken': CW_TOKEN, 'Content-Type': 'application/x-www-form-urlencoded' }
-});
-
 let ACCOUNTS = [];
 const pendingDeploys = {};
 
-// アカウント読み込み
+// ★日本時間の「今日の日付（YYYY-MM-DD）」を正確に出す関数
+function getJstDate() {
+    const now = new Date();
+    // UTC時間に9時間足して日本時間にする
+    const jstTime = now.getTime() + (9 * 60 * 60 * 1000);
+    return new Date(jstTime).toISOString().split('T')[0];
+}
+
 async function initAccounts() {
     const keys = RENDER_KEYS ? RENDER_KEYS.split(',') : [];
     const loaded = [];
@@ -42,25 +43,55 @@ async function initAccounts() {
     ACCOUNTS = loaded;
 }
 
-// ★修正ポイント: Chatwork特有の「返信タグ＋相手の名前＋改行」をまとめて消し去る最強の掃除関数
 function cleanMessage(text) {
     return text.replace(/\[(rp aid=[0-9]+ to=[0-9\-]+|To:[0-9]+)\][^\n]*\n?/g, '').trim();
 }
 
+// ★最強のお掃除関数（エラーが起きても確実にDBを綺麗にする）
+async function cleanup() {
+    const now = new Date().toISOString();
+    const { data: targets } = await supabase.from('deploy_logs').select('*').lt('delete_at', now);
+    
+    if (!targets || targets.length === 0) return;
+
+    for (const item of targets) {
+        try {
+            // Renderから削除（すでに消えていてもエラーで止めない）
+            const acc = ACCOUNTS.find(a => a.ownerId === item.render_owner_id);
+            if (acc) {
+                await axios.delete(`https://api.render.com/v1/services/${item.render_service_id}`, {
+                    headers: { Authorization: `Bearer ${acc.key}` }
+                }).catch(e => console.log(`Render削除スキップ (すでに無い可能性があります)`));
+            }
+            // Chatworkから削除
+            await cwApi.delete(`/rooms/${item.cw_room_id}/messages/${item.cw_message_id}`)
+                .catch(e => console.log(`CW削除スキップ (手動で削除済みの可能性)`));
+
+        } finally {
+            // ★絶対にデータベースから記録を消す（ここが残るとバグの元になるため）
+            await supabase.from('deploy_logs').delete().eq('id', item.id);
+            console.log(`🧹 3日経過したサーバーを削除しました: ${item.service_type}`);
+        }
+    }
+}
+setInterval(cleanup, 1000 * 60 * 60);
+
+// サーバー冬眠防止用のダミールート
+app.get('/', (req, res) => res.send('Bot is awake!'));
+
 app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
+    
+    // ★誰かが発言するたびに「ついでに」お掃除を実行する（冬眠対策）
+    cleanup();
+
     const event = req.body.webhook_event;
     if (!event || !event.body) return;
 
     const { account_id, body, room_id, message_id } = event;
     const user_name = event.from_account_id_name || "ユーザー";
-    
-    // タグとボットの名前を取り除いた純粋なメッセージ
     const bodyStr = cleanMessage(body);
 
-    // ============================================
-    // 1. /dl コマンド
-    // ============================================
     if (bodyStr === '/dl') {
         let listText = "";
         for (const [key, url] of Object.entries(REPO_CONFIG)) {
@@ -71,9 +102,6 @@ app.post('/webhook', async (req, res) => {
         return;
     }
 
-    // ============================================
-    // 2. /deploy コマンド
-    // ============================================
     if (bodyStr.startsWith('/deploy')) {
         const repoKey = bodyStr.split(' ')[1];
         const repoUrl = REPO_CONFIG[repoKey];
@@ -82,47 +110,37 @@ app.post('/webhook', async (req, res) => {
             await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title]⚠️ エラー[/title]「${repoKey}」は登録されていません。\n※ /dl で一覧を確認できます。[/info]`);
             return;
         }
-        if (ACCOUNTS.length === 0) {
-            await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\nエラー: Renderアカウントが読み込めていません。`);
-            return;
-        }
+        if (ACCOUNTS.length === 0) return;
 
-        const today = new Date().toISOString().split('T')[0];
-        const { data: logs } = await supabase.from('deploy_logs').select('*').eq('user_id', account_id.toString()).eq('deployed_at', today);
+        // ★修正: 日本時間の「今日」でチェックする
+        const todayJST = getJstDate();
+        const { data: logs } = await supabase.from('deploy_logs').select('*').eq('user_id', account_id.toString()).eq('deployed_at', todayJST);
+        
         if (logs && logs.length > 0) {
-            await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title](stop) 制限[/title]今日はもう作っています！また明日！[/info]`);
+            await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title](stop) 制限[/title]今日はもう作っています！また明日（夜中0時リセット）お待ちしてます！[/info]`);
             return;
         }
 
-        // URL待ち状態として記録 (5分有効)
         pendingDeploys[account_id] = { repoKey: repoKey, timestamp: Date.now() };
 
         await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title]🔗 URLの設定[/title]どのようなURLにしますか？\nこのメッセージに【英数字とハイフンのみ】で返信してください。\n\n（例: abide と打つと abide-xxxx.onrender.com になります）[/info]`);
         return;
     }
 
-    // ============================================
-    // 3. URL入力待ちユーザーからの返信処理
-    // ============================================
     if (pendingDeploys[account_id]) {
         const pending = pendingDeploys[account_id];
-        
-        // 5分経過キャンセル
         if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
             delete pendingDeploys[account_id];
             return; 
         }
 
         const customUrl = bodyStr;
-
-        // 文字のチェック (英数字とハイフンのみか)
         if (!/^[a-zA-Z0-9\-]+$/.test(customUrl)) {
             await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title]⚠️ エラー[/title]「${customUrl}」には使えない文字が含まれています。\n英数字とハイフンのみでもう一度返信してください。[/info]`);
             return;
         }
 
         delete pendingDeploys[account_id];
-
         const repoKey = pending.repoKey;
         const repoUrl = REPO_CONFIG[repoKey];
 
@@ -131,8 +149,6 @@ app.post('/webhook', async (req, res) => {
 
         try {
             const acc = ACCOUNTS[Math.floor(Math.random() * ACCOUNTS.length)];
-
-            // URL名生成 (重複防止でランダム4桁付与)
             const randomCode = Math.floor(1000 + Math.random() * 9000);
             const serviceName = `${customUrl.substring(0, 20)}-${randomCode}`.toLowerCase();
 
@@ -159,10 +175,12 @@ app.post('/webhook', async (req, res) => {
             const deleteAt = new Date();
             deleteAt.setDate(deleteAt.getDate() + 3);
 
+            // ★修正: 日本時間の「今日」をDBに保存する
             const { error: insError } = await supabase.from('deploy_logs').insert([{
                 user_id: account_id.toString(),
                 user_name,
                 service_type: repoKey,
+                deployed_at: getJstDate(), // ここを直しました
                 render_service_id: serviceId,
                 render_owner_id: acc.ownerId,
                 cw_message_id: cw_msg_id,
@@ -185,30 +203,8 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// 3日経過削除
-async function cleanup() {
-    const now = new Date().toISOString();
-    const { data: targets } = await supabase.from('deploy_logs').select('*').lt('delete_at', now);
-    if (targets && targets.length > 0) {
-        for (const item of targets) {
-            try {
-                const acc = ACCOUNTS.find(a => a.ownerId === item.render_owner_id);
-                if (acc) {
-                    await axios.delete(`https://api.render.com/v1/services/${item.render_service_id}`, {
-                        headers: { Authorization: `Bearer ${acc.key}` }
-                    });
-                }
-                await cwApi.delete(`/rooms/${item.cw_room_id}/messages/${item.cw_message_id}`);
-                await supabase.from('deploy_logs').delete().eq('id', item.id);
-            } catch (e) {
-                await supabase.from('deploy_logs').delete().eq('id', item.id);
-            }
-        }
-    }
-}
-setInterval(cleanup, 1000 * 60 * 60);
-
 app.listen(process.env.PORT || 3000, async () => {
     console.log(`Server started!`);
     await initAccounts();
+    cleanup(); // 起動時にもお掃除
 });
