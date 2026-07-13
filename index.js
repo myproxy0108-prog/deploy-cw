@@ -8,6 +8,8 @@ app.use(express.json());
 const { CW_TOKEN, SUPABASE_URL, SUPABASE_KEY, RENDER_KEYS } = process.env;
 
 const REPO_CONFIG = {
+    "min": "https://github.com/myproxy0108-prog/MIN-Tube-Pro",
+    "choco": "https://github.com/myproxy0108-prog/Choco-Tube-Plus"
 };
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
