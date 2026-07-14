@@ -12,17 +12,25 @@ const REPO_CONFIG = {
     "choco": "https://github.com/myproxy0108-prog/Choco-Tube-Plus"
 };
 
+// ★この行が消えていたためエラーになっていました！
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const cwApi = axios.create({
+    baseURL: 'https://api.chatwork.com/v2',
+    headers: { 'X-ChatWorkToken': CW_TOKEN, 'Content-Type': 'application/x-www-form-urlencoded' }
+});
+
 let ACCOUNTS = [];
 const pendingDeploys = {};
 
-// ★日本時間の「今日の日付（YYYY-MM-DD）」を正確に出す関数
+// 日本時間の「今日」を出す関数
 function getJstDate() {
     const now = new Date();
-    // UTC時間に9時間足して日本時間にする
     const jstTime = now.getTime() + (9 * 60 * 60 * 1000);
     return new Date(jstTime).toISOString().split('T')[0];
 }
 
+// アカウント読み込み
 async function initAccounts() {
     const keys = RENDER_KEYS ? RENDER_KEYS.split(',') : [];
     const loaded = [];
@@ -43,11 +51,12 @@ async function initAccounts() {
     ACCOUNTS = loaded;
 }
 
+// 返信タグのお掃除
 function cleanMessage(text) {
     return text.replace(/\[(rp aid=[0-9]+ to=[0-9\-]+|To:[0-9]+)\][^\n]*\n?/g, '').trim();
 }
 
-// ★最強のお掃除関数（エラーが起きても確実にDBを綺麗にする）
+// 最強のお掃除関数（DBとRenderのズレを防ぐ）
 async function cleanup() {
     const now = new Date().toISOString();
     const { data: targets } = await supabase.from('deploy_logs').select('*').lt('delete_at', now);
@@ -56,19 +65,15 @@ async function cleanup() {
 
     for (const item of targets) {
         try {
-            // Renderから削除（すでに消えていてもエラーで止めない）
             const acc = ACCOUNTS.find(a => a.ownerId === item.render_owner_id);
             if (acc) {
                 await axios.delete(`https://api.render.com/v1/services/${item.render_service_id}`, {
                     headers: { Authorization: `Bearer ${acc.key}` }
-                }).catch(e => console.log(`Render削除スキップ (すでに無い可能性があります)`));
+                }).catch(e => console.log(`Render削除スキップ`));
             }
-            // Chatworkから削除
             await cwApi.delete(`/rooms/${item.cw_room_id}/messages/${item.cw_message_id}`)
-                .catch(e => console.log(`CW削除スキップ (手動で削除済みの可能性)`));
-
+                .catch(e => console.log(`CW削除スキップ`));
         } finally {
-            // ★絶対にデータベースから記録を消す（ここが残るとバグの元になるため）
             await supabase.from('deploy_logs').delete().eq('id', item.id);
             console.log(`🧹 3日経過したサーバーを削除しました: ${item.service_type}`);
         }
@@ -76,13 +81,14 @@ async function cleanup() {
 }
 setInterval(cleanup, 1000 * 60 * 60);
 
-// サーバー冬眠防止用のダミールート
+// 冬眠防止
 app.get('/', (req, res) => res.send('Bot is awake!'));
 
+// Webhookのメイン処理
 app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
     
-    // ★誰かが発言するたびに「ついでに」お掃除を実行する（冬眠対策）
+    // 発言のたびにお掃除チェック
     cleanup();
 
     const event = req.body.webhook_event;
@@ -112,7 +118,6 @@ app.post('/webhook', async (req, res) => {
         }
         if (ACCOUNTS.length === 0) return;
 
-        // ★修正: 日本時間の「今日」でチェックする
         const todayJST = getJstDate();
         const { data: logs } = await supabase.from('deploy_logs').select('*').eq('user_id', account_id.toString()).eq('deployed_at', todayJST);
         
@@ -175,12 +180,11 @@ app.post('/webhook', async (req, res) => {
             const deleteAt = new Date();
             deleteAt.setDate(deleteAt.getDate() + 3);
 
-            // ★修正: 日本時間の「今日」をDBに保存する
             const { error: insError } = await supabase.from('deploy_logs').insert([{
                 user_id: account_id.toString(),
                 user_name,
                 service_type: repoKey,
-                deployed_at: getJstDate(), // ここを直しました
+                deployed_at: getJstDate(),
                 render_service_id: serviceId,
                 render_owner_id: acc.ownerId,
                 cw_message_id: cw_msg_id,
@@ -206,5 +210,5 @@ app.post('/webhook', async (req, res) => {
 app.listen(process.env.PORT || 3000, async () => {
     console.log(`Server started!`);
     await initAccounts();
-    cleanup(); // 起動時にもお掃除
+    cleanup();
 });
