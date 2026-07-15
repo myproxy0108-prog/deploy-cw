@@ -14,17 +14,15 @@ const cwApi = axios.create({
 });
 
 let ACCOUNTS = [];
-let REPO_CONFIG = {}; // データベースから読み込んだリポジトリ一覧
+let REPO_CONFIG = {}; 
 const pendingDeploys = {};
 
-// 日本時間の「今日」を出す関数
 function getJstDate() {
     const now = new Date();
     const jstTime = now.getTime() + (9 * 60 * 60 * 1000);
     return new Date(jstTime).toISOString().split('T')[0];
 }
 
-// アカウントのOwnerID読み込み
 async function initAccounts() {
     const keys = RENDER_KEYS ? RENDER_KEYS.split(',') : [];
     const loaded = [];
@@ -41,9 +39,9 @@ async function initAccounts() {
         }
     }
     ACCOUNTS = loaded;
+    console.log(`🚀 合計 ${ACCOUNTS.length} 個のRenderアカウントを読み込みました！`);
 }
 
-// ★追加: DBからリポジトリ設定を読み込む
 async function initRepos() {
     const { data, error } = await supabase.from('app_configs').select('*');
     if (!error && data && data.length > 0) {
@@ -51,7 +49,6 @@ async function initRepos() {
             REPO_CONFIG[row.repo_key] = { url: row.repo_url, description: row.description || "" };
         });
     } else {
-        // 最初何もない時はデフォルトを入れてDBに保存しておく
         REPO_CONFIG = {
             "tube": { url: "https://github.com/mino-hobby-pro/MIN-Tube-Pro", description: "YouTubeクローン" },
             "mirror": { url: "https://github.com/myproxy0108-prog/Cloud-moon-mirror", description: "漫画ビューア" }
@@ -60,27 +57,22 @@ async function initRepos() {
             await supabase.from('app_configs').upsert({ repo_key: key, repo_url: conf.url, description: conf.description });
         }
     }
-    console.log(`✅ リポジトリ設定読み込み完了`);
 }
 
-// ★追加: ChatworkのAPIを叩いて、発言者がルームの「管理者」か判定する関数
 async function isAdmin(roomId, accountId) {
     try {
         const res = await cwApi.get(`/rooms/${roomId}/members`);
         const member = res.data.find(m => m.account_id === Number(accountId));
         return member && member.role === 'admin';
     } catch (e) {
-        console.error("権限チェックエラー:", e.message);
         return false;
     }
 }
 
-// 返信タグ除去
 function cleanMessage(text) {
     return text.replace(/\[(rp aid=[0-9]+ to=[0-9\-]+|To:[0-9]+)\][^\n]*\n?/g, '').trim();
 }
 
-// お掃除関数
 async function cleanup() {
     const now = new Date().toISOString();
     const { data: targets } = await supabase.from('deploy_logs').select('*').lt('delete_at', now);
@@ -99,10 +91,8 @@ async function cleanup() {
 }
 setInterval(cleanup, 1000 * 60 * 60);
 
-// 冬眠防止
 app.get('/', (req, res) => res.send('Bot is awake!'));
 
-// Webhookメイン
 app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
     cleanup();
@@ -114,20 +104,16 @@ app.post('/webhook', async (req, res) => {
     const user_name = event.from_account_id_name || "ユーザー";
     const bodyStr = cleanMessage(body);
 
-    // ============================================
-    // ★追加: /add-dl [名前] [URL] [説明]
-    // ============================================
     if (bodyStr.startsWith('/add-dl ')) {
         if (!(await isAdmin(room_id, account_id))) {
             await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title]🚫 権限エラー[/title]このコマンドはルームの管理者（Admin）のみ実行可能です！[/info]`);
             return;
         }
         
-        // スペースで区切って取得
         const args = bodyStr.split(/ +/);
         const repoKey = args[1];
         const repoUrl = args[2];
-        const description = args.slice(3).join(' '); // 3番目以降はすべて説明として繋げる
+        const description = args.slice(3).join(' ');
 
         if (!repoKey || !repoUrl) {
             await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title]⚠️ 使い方[/title]/add-dl [あだ名] [GitHubのURL] [説明文(任意)][/info]`);
@@ -145,9 +131,6 @@ app.post('/webhook', async (req, res) => {
         return;
     }
 
-    // ============================================
-    // ★追加: /remove-dl [名前]
-    // ============================================
     if (bodyStr.startsWith('/remove-dl ')) {
         if (!(await isAdmin(room_id, account_id))) {
             await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title]🚫 権限エラー[/title]このコマンドはルームの管理者（Admin）のみ実行可能です！[/info]`);
@@ -161,19 +144,13 @@ app.post('/webhook', async (req, res) => {
         }
 
         const { error } = await supabase.from('app_configs').delete().eq('repo_key', repoKey);
-        if (error) {
-            await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\nエラーが発生しました: ${error.message}`);
-            return;
-        }
+        if (error) return;
 
         delete REPO_CONFIG[repoKey];
-        await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title]🗑️ 削除完了[/title]「${repoKey}」を一覧から削除しました。[/info]`);
+        await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title]🗑️ 削除完了[/title]「${repoKey}」を削除しました。[/info]`);
         return;
     }
 
-    // ============================================
-    // /dl コマンド
-    // ============================================
     if (bodyStr === '/dl') {
         let listText = "";
         for (const [key, conf] of Object.entries(REPO_CONFIG)) {
@@ -185,9 +162,6 @@ app.post('/webhook', async (req, res) => {
         return;
     }
 
-    // ============================================
-    // /deploy コマンド
-    // ============================================
     if (bodyStr.startsWith('/deploy')) {
         const repoKey = bodyStr.split(' ')[1];
         const repoConf = REPO_CONFIG[repoKey];
@@ -211,9 +185,7 @@ app.post('/webhook', async (req, res) => {
         return;
     }
 
-    // ============================================
     // URL入力待ちからの返信
-    // ============================================
     if (pendingDeploys[account_id]) {
         const pending = pendingDeploys[account_id];
         if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
@@ -235,7 +207,9 @@ app.post('/webhook', async (req, res) => {
         const cw_msg_id = startRes.data.message_id;
 
         try {
+            // ★ここでランダムにAPIキーを選択しています
             const acc = ACCOUNTS[Math.floor(Math.random() * ACCOUNTS.length)];
+            
             const randomCode = Math.floor(1000 + Math.random() * 9000);
             const serviceName = `${customUrl.substring(0, 20)}-${randomCode}`.toLowerCase();
 
@@ -276,9 +250,12 @@ app.post('/webhook', async (req, res) => {
 
             if (insError) throw new Error(`Supabase Error: ${insError.message}`);
 
+            // ★追加: 使用したAPIキーの下4桁を表示
+            const maskedKey = acc.key.substring(acc.key.length - 4);
+
             setTimeout(async () => {
                 await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, 
-                    `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title](cracker) 完了！ (cracker)[/title]あなた専用のオリジナルURLです！(shiny)\n\n🌐 URL:\n${deployUrl}\n\n[hr]※3日後に自動で消えます。[/info]`);
+                    `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title](cracker) 完了！ (cracker)[/title]あなた専用のオリジナルURLです！(shiny)\n\n🌐 URL:\n${deployUrl}\n\n[hr]🤖 使用したAPIキー: ...${maskedKey}\n🏢 アカウントID: ${acc.ownerId}\n※3日後に自動で消えます。[/info]`);
             }, 45000);
 
         } catch (err) {
@@ -292,6 +269,6 @@ app.post('/webhook', async (req, res) => {
 app.listen(process.env.PORT || 3000, async () => {
     console.log(`Server started!`);
     await initAccounts();
-    await initRepos(); // ★DBからリポジトリ情報をロード
+    await initRepos();
     cleanup();
 });
