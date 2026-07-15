@@ -207,26 +207,48 @@ app.post('/webhook', async (req, res) => {
         const cw_msg_id = startRes.data.message_id;
 
         try {
-            // ★ここでランダムにAPIキーを選択しています
-            const acc = ACCOUNTS[Math.floor(Math.random() * ACCOUNTS.length)];
-            
             const randomCode = Math.floor(1000 + Math.random() * 9000);
             const serviceName = `${customUrl.substring(0, 20)}-${randomCode}`.toLowerCase();
 
-            const createRes = await axios.post('https://api.render.com/v1/services', {
-                name: serviceName,
-                ownerId: acc.ownerId,
-                type: 'web_service',
-                repo: repoUrl,
-                autoDeploy: 'no',
-                serviceDetails: { 
-                    env: 'node', 
-                    region: 'oregon', 
-                    plan: 'free',
-                    envSpecificDetails: { buildCommand: 'npm install', startCommand: 'npm start' }
-                }
-            }, { headers: { Authorization: `Bearer ${acc.key}` } });
+            // ★追加：アカウントの順番をランダムにシャッフルする
+            const shuffledAccounts = [...ACCOUNTS].sort(() => 0.5 - Math.random());
+            
+            let createRes = null;
+            let usedAcc = null;
+            let lastErrorMsg = "";
 
+            // ★追加：成功するまでアカウントを順番にリトライする最強のループ
+            for (const acc of shuffledAccounts) {
+                try {
+                    createRes = await axios.post('https://api.render.com/v1/services', {
+                        name: serviceName,
+                        ownerId: acc.ownerId,
+                        type: 'web_service',
+                        repo: repoUrl,
+                        autoDeploy: 'no',
+                        serviceDetails: { 
+                            env: 'node', 
+                            region: 'oregon', 
+                            plan: 'free',
+                            envSpecificDetails: { buildCommand: 'npm install', startCommand: 'npm start' }
+                        }
+                    }, { headers: { Authorization: `Bearer ${acc.key}` } });
+
+                    usedAcc = acc; // 成功したアカウントを記憶
+                    break; // ★成功したらループを抜け出す
+                } catch (e) {
+                    // 失敗した場合はエラーメッセージを記録して次のアカウントへ進む
+                    lastErrorMsg = e.response?.data?.message || e.message;
+                    console.log(`⚠️ アカウント ${acc.ownerId} で失敗しました。別のアカウントでリトライします... (${lastErrorMsg})`);
+                }
+            }
+
+            // ★すべてのアカウントで失敗した場合
+            if (!usedAcc || !createRes) {
+                throw new Error(`全アカウントで作成に失敗しました。最後のエラー: ${lastErrorMsg}`);
+            }
+
+            // --- ここから下は成功時の処理 ---
             const serviceData = createRes.data.service || createRes.data;
             const serviceId = serviceData.id;
             const deployUrl = serviceData.serviceDetails?.url || serviceData.url || "URL取得エラー";
@@ -242,7 +264,7 @@ app.post('/webhook', async (req, res) => {
                 service_type: repoKey,
                 deployed_at: getJstDate(),
                 render_service_id: serviceId,
-                render_owner_id: acc.ownerId,
+                render_owner_id: usedAcc.ownerId,
                 cw_message_id: cw_msg_id,
                 cw_room_id: room_id.toString(),
                 delete_at: deleteAt.toISOString()
@@ -250,18 +272,17 @@ app.post('/webhook', async (req, res) => {
 
             if (insError) throw new Error(`Supabase Error: ${insError.message}`);
 
-            // ★追加: 使用したAPIキーの下4桁を表示
-            const maskedKey = acc.key.substring(acc.key.length - 4);
+            const maskedKey = usedAcc.key.substring(usedAcc.key.length - 4);
 
             setTimeout(async () => {
                 await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, 
-                    `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title](cracker) 完了！ (cracker)[/title]あなた専用のオリジナルURLです！(shiny)\n\n🌐 URL:\n${deployUrl}\n\n[hr]🤖 使用したAPIキー: ...${maskedKey}\n🏢 アカウントID: ${acc.ownerId}\n※3日後に自動で消えます。[/info]`);
+                    `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title](cracker) 完了！ (cracker)[/title]あなた専用のオリジナルURLです！(shiny)\n\n🌐 URL:\n${deployUrl}\n\n[hr]🤖 使用したAPIキー: ...${maskedKey}\n🏢 アカウントID: ${usedAcc.ownerId}\n※3日後に自動で消えます。[/info]`);
             }, 45000);
 
         } catch (err) {
-            const errMsg = err.response?.data?.message || err.message;
-            console.error("詳細エラー:", errMsg);
-            await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title](shock) エラー発生[/title]理由: ${errMsg}[/info]`);
+            console.error("詳細エラー:", err.message);
+            // ★全てのアカウントで全滅した時だけ、チャットにエラーを投稿する
+            await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title](shock) エラー発生[/title]Renderの空き枠が見つかりませんでした。\n理由: ${err.message}[/info]`);
         }
     }
 });
