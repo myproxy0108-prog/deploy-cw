@@ -77,14 +77,23 @@ async function cleanup() {
     const now = new Date().toISOString();
     const { data: targets } = await supabase.from('deploy_logs').select('*').lt('delete_at', now);
     if (!targets || targets.length === 0) return;
+    
     for (const item of targets) {
         try {
+            // Renderから削除
             const acc = ACCOUNTS.find(a => a.ownerId === item.render_owner_id);
             if (acc) {
                 await axios.delete(`https://api.render.com/v1/services/${item.render_service_id}`, { headers: { Authorization: `Bearer ${acc.key}` } }).catch(()=>{});
             }
+            // チャットの古い「完了」メッセージを削除
             await cwApi.delete(`/rooms/${item.cw_room_id}/messages/${item.cw_message_id}`).catch(()=>{});
+
+            // ★追加: 削除したことをユーザーに通知する
+            const notifyMsg = `body=[To:${item.user_id}] ${item.user_name}さん\n[info][title]🗑️ 環境の自動削除のお知らせ[/title]作成から3日が経過したため、あなた専用の「${item.service_type}」環境を自動削除しました。(bow)\n\nご利用ありがとうございました！またいつでも作りにきてください。[/info]`;
+            await cwApi.post(`/rooms/${item.cw_room_id}/messages`, notifyMsg).catch(e => console.log('通知の送信に失敗しました'));
+
         } finally {
+            // データベースから消す
             await supabase.from('deploy_logs').delete().eq('id', item.id);
         }
     }
@@ -185,7 +194,6 @@ app.post('/webhook', async (req, res) => {
         return;
     }
 
-    // URL入力待ちからの返信
     if (pendingDeploys[account_id]) {
         const pending = pendingDeploys[account_id];
         if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
@@ -209,15 +217,12 @@ app.post('/webhook', async (req, res) => {
         try {
             const randomCode = Math.floor(1000 + Math.random() * 9000);
             const serviceName = `${customUrl.substring(0, 20)}-${randomCode}`.toLowerCase();
-
-            // ★追加：アカウントの順番をランダムにシャッフルする
             const shuffledAccounts = [...ACCOUNTS].sort(() => 0.5 - Math.random());
             
             let createRes = null;
             let usedAcc = null;
             let lastErrorMsg = "";
 
-            // ★追加：成功するまでアカウントを順番にリトライする最強のループ
             for (const acc of shuffledAccounts) {
                 try {
                     createRes = await axios.post('https://api.render.com/v1/services', {
@@ -234,21 +239,18 @@ app.post('/webhook', async (req, res) => {
                         }
                     }, { headers: { Authorization: `Bearer ${acc.key}` } });
 
-                    usedAcc = acc; // 成功したアカウントを記憶
-                    break; // ★成功したらループを抜け出す
+                    usedAcc = acc;
+                    break;
                 } catch (e) {
-                    // 失敗した場合はエラーメッセージを記録して次のアカウントへ進む
                     lastErrorMsg = e.response?.data?.message || e.message;
-                    console.log(`⚠️ アカウント ${acc.ownerId} で失敗しました。別のアカウントでリトライします... (${lastErrorMsg})`);
+                    console.log(`⚠️ アカウント ${acc.ownerId} で失敗しました。リトライします... (${lastErrorMsg})`);
                 }
             }
 
-            // ★すべてのアカウントで失敗した場合
             if (!usedAcc || !createRes) {
                 throw new Error(`全アカウントで作成に失敗しました。最後のエラー: ${lastErrorMsg}`);
             }
 
-            // --- ここから下は成功時の処理 ---
             const serviceData = createRes.data.service || createRes.data;
             const serviceId = serviceData.id;
             const deployUrl = serviceData.serviceDetails?.url || serviceData.url || "URL取得エラー";
@@ -281,8 +283,7 @@ app.post('/webhook', async (req, res) => {
 
         } catch (err) {
             console.error("詳細エラー:", err.message);
-            // ★全てのアカウントで全滅した時だけ、チャットにエラーを投稿する
-            await cwApi.put(`/rooms/${room_id}/messages/${cw_msg_id}`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title](shock) エラー発生[/title]Renderの空き枠が見つかりませんでした。\n理由: ${err.message}[/info]`);
+            await cwApi.post(`/rooms/${room_id}/messages`, `body=[rp aid=${account_id} to=${room_id}-${message_id}]\n[info][title](shock) エラー発生[/title]Renderの空き枠が見つかりませんでした。\n理由: ${err.message}[/info]`);
         }
     }
 });
